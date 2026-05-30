@@ -87,16 +87,14 @@ def get_all_tasks():
     return response.data
 
 
-def delete_task(task_id, file_url: str):
+def delete_task(file_url: str):
     """
     Görevi veritabanından ve dosyasını Storage'dan siler.
+    Silme işlemini benzersiz olan file_url üzerinden yapar.
     """
-    # Storage'dan dosyayı sil (URL'den dosya adını çıkar)
     try:
-        # URL formatı: .../storage/v1/object/public/task-files/FILENAME
         parsed = urlparse(file_url)
         path_parts = parsed.path.split("/")
-        # "task-files" bucket adından sonraki kısım dosya adı
         if "task-files" in path_parts:
             idx = path_parts.index("task-files")
             storage_filename = "/".join(path_parts[idx + 1:])
@@ -104,14 +102,14 @@ def delete_task(task_id, file_url: str):
     except Exception as e:
         print(f"Storage silme hatası (devam ediliyor): {e}")
 
-    # Veritabanından sil
-    supabase.table("tasks").delete().eq("id", task_id).execute()
+    # Veritabanından sil (id olmadığı için file_url ile bulup siliyoruz)
+    supabase.table("tasks").delete().eq("file_url", file_url).execute()
 
 
-def update_task(task_id, new_title: str):
+def update_task(file_url: str, new_title: str):
     """
-    Görevin başlığını günceller.
+    Görevin başlığını file_url kullanarak günceller.
     """
     supabase.table("tasks").update(
         {"title": new_title}
-    ).eq("id", task_id).execute()
+    ).eq("file_url", file_url).execute()

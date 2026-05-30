@@ -15,8 +15,8 @@ class App(ctk.CTk):
 
         # ── Pencere ayarları ──
         self.title("Task Tracking App")
-        self.geometry("800x600")
-        self.minsize(700, 500)
+        self.geometry("1100x700")
+        self.minsize(900, 600)
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
 
@@ -113,7 +113,7 @@ class App(ctk.CTk):
         self.after(5000, lambda: self.upload_frame.set_status(""))
 
     # ══════════════════════════ SİLME ══════════════════════════
-    def _on_delete(self, task_id, file_url):
+    def _on_delete(self, file_url):
         confirm = messagebox.askyesno(
             "Silme Onayı",
             "Bu görevi silmek istediğinize emin misiniz?\n\n"
@@ -123,14 +123,14 @@ class App(ctk.CTk):
             return
 
         thread = threading.Thread(
-            target=self._delete_worker, args=(task_id, file_url)
+            target=self._delete_worker, args=(file_url,)
         )
         thread.daemon = True
         thread.start()
 
-    def _delete_worker(self, task_id, file_url):
+    def _delete_worker(self, file_url):
         try:
-            delete_task(task_id, file_url)
+            delete_task(file_url)
             self.after(0, self._delete_success)
         except Exception as e:
             error_msg = str(e)
@@ -144,7 +144,7 @@ class App(ctk.CTk):
         messagebox.showerror("Hata", f"Silme sırasında hata oluştu:\n{error_msg}")
 
     # ══════════════════════════ DÜZENLEME ══════════════════════════
-    def _on_edit(self, task_id, current_title):
+    def _on_edit(self, file_url, current_title):
         dialog = ctk.CTkInputDialog(
             text="Yeni görev başlığını girin:",
             title="Görevi Düzenle",
@@ -158,14 +158,14 @@ class App(ctk.CTk):
         new_title = new_title.strip()
 
         thread = threading.Thread(
-            target=self._edit_worker, args=(task_id, new_title)
+            target=self._edit_worker, args=(file_url, new_title)
         )
         thread.daemon = True
         thread.start()
 
-    def _edit_worker(self, task_id, new_title):
+    def _edit_worker(self, file_url, new_title):
         try:
-            update_task(task_id, new_title)
+            update_task(file_url, new_title)
             self.after(0, self._edit_success)
         except Exception as e:
             error_msg = str(e)
