@@ -38,6 +38,7 @@ class App(ctk.CTk):
         # Callback'leri bağla
         self.list_frame.on_delete = self._on_delete
         self.list_frame.on_edit = self._on_edit
+        self.list_frame.on_complete = self._on_complete
         self.list_frame.refresh_button.configure(command=self._refresh_tasks)
 
         # ── Sekme değişikliğinde listeyi güncelle ──
@@ -48,7 +49,7 @@ class App(ctk.CTk):
 
     # ══════════════════════════ YÜKLEME ══════════════════════════
     def _on_submit(self):
-        title, name, file_path, is_folder = self.upload_frame.get_data()
+        title, name, file_path, is_folder, status, date_str = self.upload_frame.get_data()
 
         # Doğrulama
         if not title:
@@ -57,60 +58,79 @@ class App(ctk.CTk):
         if not name:
             messagebox.showwarning("Uyarı", "Lütfen adınızı girin.")
             return
-        if not file_path:
-            messagebox.showwarning("Uyarı", "Lütfen bir dosya veya klasör seçin.")
-            return
 
         # Butonu devre dışı bırak + durum göster
         self.upload_frame.submit_button.configure(state="disabled", text="⏳ Yükleniyor...")
-        self.upload_frame.set_status("⏳ Dosya yükleniyor, lütfen bekleyin...", "#f39c12")
+        self.upload_frame.set_status("Dosya hazırlanıyor...", "orange")
 
+        # İşlemi arkaplan thread'ine at (GUI donmasın)
         thread = threading.Thread(
-            target=self._upload_worker, args=(title, file_path, name, is_folder)
+            target=self._upload_worker, args=(title, file_path, name, is_folder, status, date_str)
         )
         thread.daemon = True
         thread.start()
 
-    def _upload_worker(self, title, file_path, name, is_folder):
-        temp_zip = None
+    def _upload_worker(self, title, file_path, name, is_folder, status, date_str):
         try:
-            actual_path = file_path
+            if is_folder and file_path:
+                self.upload_frame.set_status("Klasör ZIP yapılıyor...", "orange")
+                # Geçici dizinde ZIP oluştur
+                temp_dir = tempfile.gettempdir()
+                zip_filename = os.path.basename(file_path)
+                zip_path = os.path.join(temp_dir, zip_filename)
+                
+                shutil.make_archive(zip_path, 'zip', file_path)
+                file_path = zip_path + ".zip"
 
-            if is_folder:
-                folder_name = os.path.basename(file_path)
-                temp_dir = tempfile.mkdtemp()
-                zip_base = os.path.join(temp_dir, folder_name)
-                temp_zip = shutil.make_archive(zip_base, "zip", file_path)
-                actual_path = temp_zip
+            self.upload_frame.set_status("Supabase'e yükleniyor...", "orange")
+            upload_task(title, file_path, name, status, date_str)
 
-            upload_task(title, actual_path, name)
+            # Başarılı dönüşü ana thread'de yap
             self.after(0, self._upload_success)
 
         except Exception as e:
+            # Hata mesajını değişkene alıp ana thread'e iletiyoruz
             error_msg = str(e)
             self.after(0, lambda: self._upload_error(error_msg))
-        finally:
-            if temp_zip and os.path.exists(temp_zip):
-                try:
-                    os.remove(temp_zip)
-                    os.rmdir(os.path.dirname(temp_zip))
-                except Exception:
-                    pass
 
     def _upload_success(self):
-        self.upload_frame.submit_button.configure(state="normal", text="🚀  Gönder")
-        self.upload_frame.set_status("✅ Görev başarıyla yüklendi!", "#2ecc71")
+        self.upload_frame.submit_button.configure(state="normal", text="🚀 Gönder")
+        self.upload_frame.set_status("✅ Görev başarıyla eklendi!", "green")
         self.upload_frame.clear_form()
-        messagebox.showinfo("Başarılı", "Görev başarıyla yüklendi! ✅")
-        # 5 saniye sonra durum mesajını temizle
-        self.after(5000, lambda: self.upload_frame.set_status(""))
+        
+        # Görevler sekmesini yenile ve o sekmeye geç
         self._refresh_tasks()
+        self.tabview.set("Görevler")
+        self.after(5000, lambda: self.upload_frame.set_status(""))
 
     def _upload_error(self, error_msg):
         self.upload_frame.submit_button.configure(state="normal", text="🚀  Gönder")
         self.upload_frame.set_status(f"❌ Yükleme başarısız!", "#e74c3c")
         messagebox.showerror("Hata", f"Yükleme sırasında bir hata oluştu:\n{error_msg}")
-        self.after(5000, lambda: self.upload_frame.set_status(""))
+
+    # ══════════════════════════ TAMAMLA ══════════════════════════
+    def _on_complete(self, file_url):
+        thread = threading.Thread(
+            target=self._complete_worker, args=(file_url,)
+        )
+        thread.daemon = True
+        thread.start()
+
+    def _complete_worker(self, file_url):
+        try:
+            from supabase_config import complete_task
+            complete_task(file_url)
+            self.after(0, self._complete_success)
+        except Exception as e:
+            error_msg = str(e)
+            self.after(0, lambda: self._complete_error(error_msg))
+
+    def _complete_success(self):
+        messagebox.showinfo("Başarılı", "Görev başarıyla tamamlandı! ✅")
+        self._refresh_tasks()
+
+    def _complete_error(self, error_msg):
+        messagebox.showerror("Hata", f"Görev güncellenirken hata oluştu:\n{error_msg}")
 
     # ══════════════════════════ SİLME ══════════════════════════
     def _on_delete(self, file_url):

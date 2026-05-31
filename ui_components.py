@@ -37,6 +37,29 @@ class UploadFrame(ctk.CTkFrame):
         self.name_entry = ctk.CTkEntry(self, placeholder_text="Adınızı girin...", width=400)
         self.name_entry.pack(padx=30, pady=(2, 10))
 
+        # ── Görev Türü Seçimi ──
+        self.type_label = ctk.CTkLabel(self, text="Görev Türü:")
+        self.type_label.pack(anchor="w", padx=30, pady=(10, 0))
+
+        self.task_type_seg = ctk.CTkSegmentedButton(
+            self, values=["📅 Yeni Görev Planla", "✅ Yaptığım İşi Ekle"], width=400,
+            command=self._on_type_change
+        )
+        self.task_type_seg.set("✅ Yaptığım İşi Ekle")  # Varsayılan
+        self.task_type_seg.pack(padx=30, pady=(2, 10))
+
+        # ── Planlanan Tarih ──
+        self.date_label = ctk.CTkLabel(self, text="Tarih (GG.AA.YYYY) - Boş bırakılırsa bugün sayılır:")
+        self.date_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.date_entry = ctk.CTkEntry(self.date_frame, placeholder_text="Örn: 05.06.2026", width=280)
+        self.date_entry.pack(side="left", padx=(0, 10))
+        self.date_btn = ctk.CTkButton(self.date_frame, text="📅 Seç", width=110, command=self._open_date_picker)
+        self.date_btn.pack(side="left")
+        # Sadece Planla seçiliyse gösterilmek üzere packlemeyi _on_type_change'de yapacağız.
+        
+        self.task_type_seg.set("✅ Yaptığım İşi Ekle")
+        self._on_type_change("✅ Yaptığım İşi Ekle")
+
         # ── Dosya / Klasör Seçme Butonları ──
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
         btn_frame.pack(pady=(15, 2))
@@ -80,6 +103,22 @@ class UploadFrame(ctk.CTkFrame):
         )
         self.status_label.pack(pady=(5, 15))
 
+    def _on_type_change(self, value):
+        if "Planla" in value:
+            self.date_label.pack(anchor="w", padx=30, pady=(10, 0))
+            self.date_frame.pack(padx=30, pady=(2, 10), anchor="w")
+        else:
+            self.date_label.pack_forget()
+            self.date_frame.pack_forget()
+
+    def _open_date_picker(self):
+        def on_date(date_tuple):
+            y, m, d = date_tuple
+            date_str = f"{d:02d}.{m:02d}.{y}"
+            self.date_entry.delete(0, "end")
+            self.date_entry.insert(0, date_str)
+        DatePickerPopup(self, on_date)
+
     # ── Dosya seçme diyaloğu ──
     def _select_file(self):
         path = filedialog.askopenfilename(
@@ -117,13 +156,24 @@ class UploadFrame(ctk.CTkFrame):
         title = self.title_entry.get().strip()
         name = self.name_entry.get().strip()
         file_path = self.selected_file_path
-        return title, name, file_path, self.is_folder
+        date_str = self.date_entry.get().strip()
+        
+        selected_type = self.task_type_seg.get()
+        if "Planla" in selected_type:
+            status = "pending"
+        else:
+            status = "completed"
+            
+        return title, name, file_path, self.is_folder, status, date_str
 
     def clear_form(self):
         self.title_entry.delete(0, "end")
         self.name_entry.delete(0, "end")
+        self.date_entry.delete(0, "end")
         self.selected_file_path = None
         self.is_folder = False
+        self.task_type_seg.set("✅ Yaptığım İşi Ekle")
+        self._on_type_change("✅ Yaptığım İşi Ekle")
         self.file_label.configure(text="Henüz dosya veya klasör seçilmedi.", text_color="gray")
 
 
@@ -261,6 +311,7 @@ class ListFrame(ctk.CTkFrame):
 
         self.on_delete = None
         self.on_edit = None
+        self.on_complete = None
         self.all_tasks = []
         self.selected_date = None
 
@@ -395,14 +446,26 @@ class ListFrame(ctk.CTkFrame):
 
     def _create_task_card(self, task: dict):
         """Tek bir görev kartı oluşturur."""
-        card = ctk.CTkFrame(self.scrollable, corner_radius=10, border_width=1, border_color="gray30")
+        task_id = task.get("id")
+        file_url = task.get("file_url", "")
+        task_title = task.get("title", "")
+        status = task.get("status", "completed")  # Varsayılan eski veriler için completed
+
+        # Durum ikonu
+        title_prefix = "⏳ " if status == "pending" else "✅ "
+        
+        # Eğer pending ise hafif kırmızımsı border, completed ise standart border
+        border_col = "#e67e22" if status == "pending" else "#2ecc71"
+        
+        card = ctk.CTkFrame(self.scrollable, corner_radius=10, border_width=2, border_color=border_col)
         card.pack(fill="x", padx=10, pady=5)
 
         info_frame = ctk.CTkFrame(card, fg_color="transparent")
         info_frame.pack(side="left", fill="x", expand=True, padx=15, pady=10)
 
+        title_color = "white" if status == "pending" else "#2ecc71"
         title_lbl = ctk.CTkLabel(
-            info_frame, text=task.get("title", "Başlıksız"), font=ctk.CTkFont(size=16, weight="bold"), anchor="w"
+            info_frame, text=title_prefix + task_title, font=ctk.CTkFont(size=16, weight="bold"), anchor="w", text_color=title_color
         )
         title_lbl.pack(anchor="w")
 
@@ -410,8 +473,10 @@ class ListFrame(ctk.CTkFrame):
         dt = self._parse_datetime_obj(task.get("created_at", ""))
         time_str = self._format_datetime(dt) if dt else "Tarih bilinmiyor"
         
+        status_text = "Bekliyor" if status == "pending" else "Tamamlandı"
+        status_color = "gray" if status == "pending" else "#2ecc71"
         time_lbl = ctk.CTkLabel(
-            info_frame, text=f"📅 Eklendiği Zaman: {time_str}", font=ctk.CTkFont(size=12), text_color="gray", anchor="w"
+            info_frame, text=f"📅 Eklendiği Zaman: {time_str}  |  Durum: {status_text}", font=ctk.CTkFont(size=12), text_color=status_color, anchor="w"
         )
         time_lbl.pack(anchor="w", pady=(2, 0))
 
@@ -419,14 +484,27 @@ class ListFrame(ctk.CTkFrame):
         btn_frame = ctk.CTkFrame(card, fg_color="transparent")
         btn_frame.pack(side="right", padx=10, pady=10)
 
-        file_url = task.get("file_url", "")
-        task_title = task.get("title", "")
+        # Tamamla butonu (sadece bekleyen görevler için)
+        if status == "pending":
+            complete_btn = ctk.CTkButton(
+                btn_frame, text="✔️ Tamamla", width=100, height=32, font=ctk.CTkFont(size=12, weight="bold"),
+                fg_color="#2ecc71", hover_color="#27ae60",
+                command=lambda furl=file_url: self._on_complete_click(furl)
+            )
+            complete_btn.pack(side="left", padx=(0, 10))
 
-        open_btn = ctk.CTkButton(
-            btn_frame, text="📂 Dosyayı Aç", width=100, height=32, font=ctk.CTkFont(size=12, weight="bold"),
-            command=lambda url=file_url: webbrowser.open(url)
-        )
-        open_btn.pack(side="left", padx=3)
+        # Eğer dosya varsa 'Aç' butonu koy, yoksa 'Metin Görevi' yaz
+        if file_url and not file_url.startswith("no-file-"):
+            open_btn = ctk.CTkButton(
+                btn_frame, text="📂 Dosyayı Aç", width=100, height=32, font=ctk.CTkFont(size=12, weight="bold"),
+                command=lambda url=file_url: webbrowser.open(url)
+            )
+            open_btn.pack(side="left", padx=3)
+        else:
+            text_lbl = ctk.CTkLabel(
+                btn_frame, text="📝 Dosya Yok", text_color="gray", font=ctk.CTkFont(size=12, slant="italic")
+            )
+            text_lbl.pack(side="left", padx=(0, 10))
 
         edit_btn = ctk.CTkButton(
             btn_frame, text="✏️", width=35, height=32, fg_color="#f39c12", hover_color="#e67e22",
@@ -440,6 +518,10 @@ class ListFrame(ctk.CTkFrame):
         )
         delete_btn.pack(side="left", padx=3)
 
+    def _on_complete_click(self, file_url):
+        if self.on_complete:
+            self.on_complete(file_url)
+
     def _on_edit_click(self, file_url, current_title):
         if self.on_edit:
             self.on_edit(file_url, current_title)
@@ -447,3 +529,27 @@ class ListFrame(ctk.CTkFrame):
     def _on_delete_click(self, file_url):
         if self.on_delete:
             self.on_delete(file_url)
+
+class DatePickerPopup(ctk.CTkToplevel):
+    def __init__(self, master, on_date_selected, **kwargs):
+        super().__init__(master, **kwargs)
+        self.title("Tarih Seç")
+        self.geometry("350x420")
+        self.resizable(False, False)
+        
+        # Modal olması için
+        self.transient(master)
+        self.grab_set()
+        
+        self.on_date_selected = on_date_selected
+        
+        self.calendar = CalendarFrame(self, on_date_select=self._on_select)
+        self.calendar.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # Seçim yaparken 'Tüm Zamanlar' butonuna gerek yok, gizleyelim.
+        self.calendar.all_time_btn.pack_forget()
+        
+    def _on_select(self, date_tuple):
+        if date_tuple:
+            self.on_date_selected(date_tuple)
+            self.destroy()
