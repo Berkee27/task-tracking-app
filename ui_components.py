@@ -553,3 +553,504 @@ class DatePickerPopup(ctk.CTkToplevel):
         if date_tuple:
             self.on_date_selected(date_tuple)
             self.destroy()
+
+
+# ==============================================================================
+#                      ÇALIŞMA ODASI (STUDY ROOM) BİLEŞENİ
+# ==============================================================================
+import json
+import threading
+from datetime import datetime, timezone
+from supabase_config import (
+    get_or_create_user_status,
+    toggle_user_study_status,
+    heartbeat_user_status,
+    get_all_users_status
+)
+
+def format_seconds(seconds):
+    seconds = int(seconds)
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    secs = seconds % 60
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+def parse_iso_datetime(iso_str):
+    if not iso_str:
+        return None
+    try:
+        clean_str = iso_str.replace("Z", "+00:00")
+        return datetime.fromisoformat(clean_str)
+    except Exception:
+        return None
+
+
+class StudyRoomFrame(ctk.CTkFrame):
+    """Canlı Çalışma Odası ve Çalışma Süreleri Paneli."""
+
+    def __init__(self, master, app, **kwargs):
+        super().__init__(master, **kwargs)
+        self.app = app
+
+        self.username = ""
+        self.my_is_active = False
+        self.my_today_study_time = 0  # saniye
+        self.my_last_status_change = None  # datetime (UTC)
+
+        self.heartbeat_counter = 0
+        self.other_users_data = []
+        self.user_cards = {}
+
+        # Sol Panel (Profilim/Durumum) ve Sağ Panel (Çalışma Odası) oranları
+        self.grid_columnconfigure(0, weight=0, minsize=380)
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+
+        # ── SOL PANEL: Profil ve Durum Yönetimi ──
+        self.left_panel = ctk.CTkFrame(self, width=360)
+        self.left_panel.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+
+        self.left_header = ctk.CTkLabel(
+            self.left_panel, text="🧘 Çalışma Profilim", font=ctk.CTkFont(size=20, weight="bold")
+        )
+        self.left_header.pack(pady=(20, 10))
+
+        # Kullanıcı Adı Ayarlama
+        name_frame = ctk.CTkFrame(self.left_panel, fg_color="transparent")
+        name_frame.pack(fill="x", padx=25, pady=5)
+
+        name_lbl = ctk.CTkLabel(name_frame, text="Kullanıcı Adınız:")
+        name_lbl.pack(anchor="w", padx=5)
+
+        entry_btn_frame = ctk.CTkFrame(name_frame, fg_color="transparent")
+        entry_btn_frame.pack(fill="x", pady=5)
+
+        self.username_entry = ctk.CTkEntry(
+            entry_btn_frame, placeholder_text="Adınızı yazın...", width=200
+        )
+        self.username_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
+
+        self.save_name_btn = ctk.CTkButton(
+            entry_btn_frame, text="Kaydet", width=80, font=ctk.CTkFont(weight="bold"),
+            command=self._on_save_username
+        )
+        self.save_name_btn.pack(side="right")
+
+        # Canlı Durum Gösterge Kartı
+        self.status_card = ctk.CTkFrame(
+            self.left_panel, corner_radius=15, border_width=3, border_color="#e74c3c", fg_color="#2c3e50"
+        )
+        self.status_card.pack(fill="both", expand=True, padx=25, pady=(15, 20))
+
+        self.status_dot = ctk.CTkLabel(
+            self.status_card, text="●", text_color="#e74c3c", font=ctk.CTkFont(size=28)
+        )
+        self.status_dot.pack(pady=(20, 0))
+
+        self.status_text_lbl = ctk.CTkLabel(
+            self.status_card, text="MOLA VERİLİYOR", font=ctk.CTkFont(size=18, weight="bold"), text_color="#e74c3c"
+        )
+        self.status_text_lbl.pack(pady=5)
+
+        duration_title = ctk.CTkLabel(
+            self.status_card, text="Bugünkü Toplam Çalışma Süreniz:", font=ctk.CTkFont(size=13), text_color="gray"
+        )
+        duration_title.pack(pady=(25, 0))
+
+        self.my_timer_lbl = ctk.CTkLabel(
+            self.status_card, text="00:00:00", font=ctk.CTkFont(size=38, weight="bold", family="Courier New")
+        )
+        self.my_timer_lbl.pack(pady=10)
+
+        # Başlat / Durdur Butonu
+        self.toggle_study_btn = ctk.CTkButton(
+            self.status_card,
+            text="🟢 Çalışmaya Başla",
+            height=50,
+            font=ctk.CTkFont(size=16, weight="bold"),
+            fg_color="#2ecc71",
+            hover_color="#27ae60",
+            command=self._on_toggle_study,
+            state="disabled"
+        )
+        self.toggle_study_btn.pack(fill="x", padx=30, pady=25)
+
+        # ── SAĞ PANEL: Çalışma Odası Listesi ──
+        self.right_panel = ctk.CTkFrame(self, fg_color="transparent")
+        self.right_panel.grid(row=0, column=1, sticky="nsew", padx=10, pady=10)
+
+        header_frame = ctk.CTkFrame(self.right_panel, fg_color="transparent")
+        header_frame.pack(fill="x", pady=(15, 10), padx=10)
+
+        self.right_header = ctk.CTkLabel(
+            header_frame, text="👥 Çalışma Odasındakiler (Canlı)", font=ctk.CTkFont(size=20, weight="bold")
+        )
+        self.right_header.pack(side="left")
+
+        self.refresh_btn = ctk.CTkButton(
+            header_frame, text="🔄 Yenile", width=90, height=30, font=ctk.CTkFont(size=12, weight="bold"),
+            command=self._refresh_users_manual
+        )
+        self.refresh_btn.pack(side="right")
+
+        self.scrollable = ctk.CTkScrollableFrame(self.right_panel)
+        self.scrollable.pack(fill="both", expand=True, padx=5, pady=(0, 10))
+
+        # Zamanlayıcıları başlat
+        self._tick_loop()
+        self._auto_refresh_loop()
+
+        # Kayıtlı kullanıcı adı varsa otomatik yükle
+        self.after(100, self._load_saved_user)
+
+    def _load_saved_user(self):
+        saved_name = self.app.settings.get("username", "")
+        if saved_name:
+            self.username_entry.insert(0, saved_name)
+            self._on_save_username()
+
+    # ── KULLANICI AYARLARI ──
+    def _on_save_username(self):
+        name = self.username_entry.get().strip().capitalize()
+        if not name:
+            from tkinter import messagebox
+            messagebox.showwarning("Uyarı", "Lütfen geçerli bir kullanıcı adı girin.")
+            return
+
+        self.save_name_btn.configure(state="disabled", text="⏳...")
+        self.username_entry.configure(state="disabled")
+
+        # Supabase'den profil çekme işlemini arkaplanda çalıştır
+        thread = threading.Thread(target=self._load_profile_worker, args=(name,))
+        thread.daemon = True
+        thread.start()
+
+    def _load_profile_worker(self, name):
+        try:
+            profile = get_or_create_user_status(name)
+            self.after(0, lambda: self._on_profile_loaded(name, profile))
+        except Exception as e:
+            self.after(0, lambda: self._on_profile_load_failed(str(e)))
+
+    def _on_profile_loaded(self, name, profile):
+        self.save_name_btn.configure(state="normal", text="Kaydet")
+        self.username_entry.configure(state="normal")
+
+        if not profile:
+            from tkinter import messagebox
+            messagebox.showerror("Hata", "Kullanıcı profili yüklenemedi.")
+            return
+
+        self.username = name
+        self.app.save_username(name)  # Local settings'e kaydet
+
+        self.my_is_active = profile.get("is_active", False)
+        self.my_today_study_time = profile.get("today_study_time", 0)
+        self.my_last_status_change = parse_iso_datetime(profile.get("last_status_change"))
+
+        self.toggle_study_btn.configure(state="normal")
+        self._update_my_status_ui()
+        self._refresh_users_manual()
+
+    def _on_profile_load_failed(self, err_msg):
+        self.save_name_btn.configure(state="normal", text="Kaydet")
+        self.username_entry.configure(state="normal")
+        from tkinter import messagebox
+        messagebox.showerror("Hata", f"Veritabanı bağlantı hatası:\n{err_msg}")
+
+    # ── DURUM DEĞİŞTİRME (Çalışma Başlat/Durdur) ──
+    def _on_toggle_study(self):
+        if not self.username:
+            return
+
+        next_active = not self.my_is_active
+        self.toggle_study_btn.configure(state="disabled", text="⏳ Güncelleniyor...")
+
+        thread = threading.Thread(target=self._toggle_study_worker, args=(next_active,))
+        thread.daemon = True
+        thread.start()
+
+    def _toggle_study_worker(self, next_active):
+        try:
+            profile = toggle_user_study_status(self.username, next_active)
+            self.after(0, lambda: self._on_toggle_finished(profile, next_active))
+        except Exception as e:
+            self.after(0, lambda: self._on_toggle_failed(str(e)))
+
+    def _on_toggle_finished(self, profile, next_active):
+        self.toggle_study_btn.configure(state="normal")
+        if not profile:
+            from tkinter import messagebox
+            messagebox.showerror("Hata", "Durum güncellenirken hata oluştu.")
+            return
+
+        self.my_is_active = profile.get("is_active", False)
+        self.my_today_study_time = profile.get("today_study_time", 0)
+        self.my_last_status_change = parse_iso_datetime(profile.get("last_status_change"))
+
+        self.heartbeat_counter = 0
+        self._update_my_status_ui()
+        self._refresh_users_manual()
+
+    def _on_toggle_failed(self, err_msg):
+        self.toggle_study_btn.configure(state="normal")
+        self._update_my_status_ui()
+        from tkinter import messagebox
+        messagebox.showerror("Hata", f"Bağlantı hatası:\n{err_msg}")
+
+    def _update_my_status_ui(self):
+        if self.my_is_active:
+            # Aktif (Ders Çalışıyor) Görünümü
+            self.status_card.configure(border_color="#2ecc71", fg_color="#1a3c26")
+            self.status_dot.configure(text_color="#2ecc71")
+            self.status_text_lbl.configure(text="DERS ÇALIŞIYOR", text_color="#2ecc71")
+            self.toggle_study_btn.configure(
+                text="🔴 Çalışmayı Durdur",
+                fg_color="#e74c3c",
+                hover_color="#c0392b"
+            )
+        else:
+            # Pasif (Mola) Görünümü
+            self.status_card.configure(border_color="#e74c3c", fg_color="#2c3e50")
+            self.status_dot.configure(text_color="#e74c3c")
+            self.status_text_lbl.configure(text="MOLA VERİLİYOR", text_color="#e74c3c")
+            self.toggle_study_btn.configure(
+                text="🟢 Çalışmaya Başla",
+                fg_color="#2ecc71",
+                hover_color="#27ae60"
+            )
+
+    # ── CANLI ZAMANLAYICI & KALP ATIŞI SÜRECİ ──
+    def _tick_loop(self):
+        self.after(1000, self._tick_loop)
+
+        now_utc = datetime.now(timezone.utc)
+
+        # 1. Kendi Sayacımı Güncelle
+        if self.username:
+            if self.my_is_active and self.my_last_status_change:
+                elapsed = int((now_utc - self.my_last_status_change).total_seconds())
+                if elapsed < 0:
+                    elapsed = 0
+                current_time = self.my_today_study_time + elapsed
+
+                # Kalp Atışı (Her 30 saniyede bir veritabanına yedekle)
+                self.heartbeat_counter += 1
+                if self.heartbeat_counter >= 30:
+                    self.heartbeat_counter = 0
+                    self._send_heartbeat(elapsed)
+            else:
+                current_time = self.my_today_study_time
+
+            self.my_timer_lbl.configure(text=format_seconds(current_time))
+
+        # 2. Diğer Kullanıcıların Sayaçlarını Canlı Tıklat
+        for user_data in self.other_users_data:
+            other_name = user_data.get("username")
+            if other_name == self.username:
+                continue
+
+            is_active = user_data.get("is_active", False)
+            updated_at_str = user_data.get("updated_at")
+
+            # Zaman aşımı kontrolü (2 dakika heartbeat gelmediyse pasif say)
+            is_timed_out = False
+            if is_active and updated_at_str:
+                updated_at = parse_iso_datetime(updated_at_str)
+                if updated_at:
+                    diff = (now_utc - updated_at).total_seconds()
+                    if diff > 120:
+                        is_timed_out = True
+
+            if is_active and not is_timed_out:
+                last_change_str = user_data.get("last_status_change")
+                last_change = parse_iso_datetime(last_change_str)
+                today_time = user_data.get("today_study_time", 0)
+                if last_change:
+                    elapsed = int((now_utc - last_change).total_seconds())
+                    if elapsed < 0:
+                        elapsed = 0
+                    current_time = today_time + elapsed
+                else:
+                    current_time = today_time
+            else:
+                current_time = user_data.get("today_study_time", 0)
+
+            if other_name in self.user_cards:
+                self.user_cards[other_name]["timer_lbl"].configure(text=format_seconds(current_time))
+                if is_timed_out and user_data.get("is_active", False):
+                    # Görsel olarak mola moduna çek
+                    self.user_cards[other_name]["dot"].configure(text_color="#e74c3c")
+                    self.user_cards[other_name]["status_lbl"].configure(
+                        text="Mola Veriyor (Bağlantı Kesildi)", text_color="gray"
+                    )
+                    self.user_cards[other_name]["card"].configure(border_color="gray40")
+
+    def _send_heartbeat(self, elapsed_seconds):
+        if not self.username or elapsed_seconds <= 0:
+            return
+        thread = threading.Thread(target=self._heartbeat_worker, args=(elapsed_seconds,))
+        thread.daemon = True
+        thread.start()
+
+    def _heartbeat_worker(self, elapsed_seconds):
+        try:
+            profile = heartbeat_user_status(self.username, elapsed_seconds)
+            if profile:
+                self.after(0, lambda: self._on_heartbeat_finished(profile))
+        except Exception as e:
+            print(f"Heartbeat DB save error: {e}")
+
+    def _on_heartbeat_finished(self, profile):
+        self.my_today_study_time = profile.get("today_study_time", 0)
+        self.my_last_status_change = parse_iso_datetime(profile.get("last_status_change"))
+        self.heartbeat_counter = 0
+
+    def save_and_stop_study_sync(self):
+        """Kapatılırken aktif süreyi veritabanına kaydeder (senkron)."""
+        if self.username and self.my_is_active:
+            print("Çalışma kaydediliyor ve sonlandırılıyor...")
+            try:
+                toggle_user_study_status(self.username, False)
+            except Exception as e:
+                print(f"Exit save error: {e}")
+
+    # ── KULLANICI LİSTESİ ÇEKME & YENİLEME ──
+    def _refresh_users_manual(self):
+        self.refresh_btn.configure(state="disabled", text="⏳...")
+        thread = threading.Thread(target=self._refresh_users_worker)
+        thread.daemon = True
+        thread.start()
+
+    def _refresh_users_worker(self):
+        try:
+            users = get_all_users_status()
+            self.after(0, lambda: self._on_users_refreshed(users))
+        except Exception as e:
+            print(f"Error fetching users: {e}")
+            self.after(0, self._on_users_refresh_failed)
+
+    def _on_users_refreshed(self, users):
+        self.refresh_btn.configure(state="normal", text="🔄 Yenile")
+        self.other_users_data = users
+        self._render_users_list()
+
+    def _on_users_refresh_failed(self):
+        self.refresh_btn.configure(state="normal", text="🔄 Yenile")
+
+    def _auto_refresh_loop(self):
+        self.after(15000, self._auto_refresh_loop)
+        if not self.username:
+            return
+
+        thread = threading.Thread(target=self._auto_refresh_worker)
+        thread.daemon = True
+        thread.start()
+
+    def _auto_refresh_worker(self):
+        try:
+            users = get_all_users_status()
+            self.after(0, lambda: self._on_users_refreshed_auto(users))
+        except Exception as e:
+            print(f"Auto refresh error: {e}")
+
+    def _on_users_refreshed_auto(self, users):
+        self.other_users_data = users
+        self._render_users_list()
+
+    def _render_users_list(self):
+        for widget in self.scrollable.winfo_children():
+            widget.destroy()
+
+        self.user_cards = {}
+        now_utc = datetime.now(timezone.utc)
+
+        visible_users = self.other_users_data
+        if not visible_users:
+            empty_lbl = ctk.CTkLabel(
+                self.scrollable, text="Çalışma odasında henüz kimse yok.", text_color="gray", font=ctk.CTkFont(size=14)
+            )
+            empty_lbl.pack(pady=40)
+            return
+
+        for user in visible_users:
+            uname = user.get("username", "Bilinmeyen")
+            is_me = (uname == self.username)
+
+            is_active = user.get("is_active", False)
+            updated_at_str = user.get("updated_at")
+
+            is_timed_out = False
+            if is_active and updated_at_str:
+                updated_at = parse_iso_datetime(updated_at_str)
+                if updated_at:
+                    diff = (now_utc - updated_at).total_seconds()
+                    if diff > 120:
+                        is_timed_out = True
+
+            if is_active and not is_timed_out:
+                border_col = "#2ecc71"
+                dot_col = "#2ecc71"
+                status_text = "Çalışıyor..."
+                status_text_color = "#2ecc71"
+
+                last_change_str = user.get("last_status_change")
+                last_change = parse_iso_datetime(last_change_str)
+                today_time = user.get("today_study_time", 0)
+                if last_change:
+                    elapsed = int((now_utc - last_change).total_seconds())
+                    if elapsed < 0:
+                        elapsed = 0
+                    current_time = today_time + elapsed
+                else:
+                    current_time = today_time
+            else:
+                border_col = "gray40"
+                dot_col = "#e74c3c"
+                status_text = "Mola Veriyor"
+                if is_timed_out and is_active:
+                    status_text = "Mola Veriyor (Bağlantı Kesildi)"
+                status_text_color = "gray"
+                current_time = user.get("today_study_time", 0)
+
+            card_title = f"{uname} (Sen)" if is_me else uname
+            card_title_color = "#f1c40f" if is_me else "white"
+
+            card = ctk.CTkFrame(
+                self.scrollable, corner_radius=10, border_width=2, border_color=border_col
+            )
+            card.pack(fill="x", padx=10, pady=5)
+
+            info_frame = ctk.CTkFrame(card, fg_color="transparent")
+            info_frame.pack(side="left", fill="x", expand=True, padx=15, pady=8)
+
+            name_dot_frame = ctk.CTkFrame(info_frame, fg_color="transparent")
+            name_dot_frame.pack(anchor="w")
+
+            dot = ctk.CTkLabel(
+                name_dot_frame, text="●", text_color=dot_col, font=ctk.CTkFont(size=16)
+            )
+            dot.pack(side="left", padx=(0, 5))
+
+            name_lbl = ctk.CTkLabel(
+                name_dot_frame, text=card_title, font=ctk.CTkFont(size=15, weight="bold"), text_color=card_title_color
+            )
+            name_lbl.pack(side="left")
+
+            status_lbl = ctk.CTkLabel(
+                info_frame, text=status_text, font=ctk.CTkFont(size=12), text_color=status_text_color
+            )
+            status_lbl.pack(anchor="w", pady=(2, 0))
+
+            timer_lbl = ctk.CTkLabel(
+                card, text=format_seconds(current_time), font=ctk.CTkFont(size=20, weight="bold", family="Courier New")
+            )
+            timer_lbl.pack(side="right", padx=20)
+
+            self.user_cards[uname] = {
+                "card": card,
+                "dot": dot,
+                "name_lbl": name_lbl,
+                "status_lbl": status_lbl,
+                "timer_lbl": timer_lbl
+            }

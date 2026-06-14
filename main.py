@@ -1,4 +1,5 @@
 import os
+import json
 import shutil
 import tempfile
 import threading
@@ -6,12 +7,17 @@ import customtkinter as ctk
 from tkinter import messagebox
 
 from supabase_config import upload_task, get_all_tasks, delete_task, update_task
-from ui_components import UploadFrame, ListFrame
+from ui_components import UploadFrame, ListFrame, StudyRoomFrame
+
 
 
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
+
+        # ── Settings ──
+        self.settings_path = os.path.join(os.path.dirname(__file__), "settings.json")
+        self.settings = self._load_settings()
 
         # ── Pencere ayarları ──
         self.title("Task Tracking App")
@@ -24,13 +30,23 @@ class App(ctk.CTk):
         self.tabview = ctk.CTkTabview(self, width=760, height=560)
         self.tabview.pack(fill="both", expand=True, padx=20, pady=20)
 
+        self.tabview.add("Çalışma Odası")
         self.tabview.add("Görev Yükle")
         self.tabview.add("Görevler")
+
+        # ── Study Room Frame ──
+        self.study_room_frame = StudyRoomFrame(self.tabview.tab("Çalışma Odası"), self)
+        self.study_room_frame.pack(fill="both", expand=True)
 
         # ── Upload Frame ──
         self.upload_frame = UploadFrame(self.tabview.tab("Görev Yükle"))
         self.upload_frame.pack(fill="both", expand=True)
         self.upload_frame.submit_button.configure(command=self._on_submit)
+
+        # Pre-fill name if it was saved in settings
+        saved_name = self.settings.get("username", "")
+        if saved_name:
+            self.upload_frame.name_entry.insert(0, saved_name)
 
         # ── List Frame ──
         self.list_frame = ListFrame(self.tabview.tab("Görevler"))
@@ -43,6 +59,9 @@ class App(ctk.CTk):
 
         # ── Sekme değişikliğinde listeyi güncelle ──
         self.tabview.configure(command=self._on_tab_change)
+
+        # ── Kapatma İşlemi Protokolü ──
+        self.protocol("WM_DELETE_WINDOW", self._on_closing)
 
         # ── İlk açılışta görev listesini yükle ──
         self._refresh_tasks()
@@ -202,6 +221,9 @@ class App(ctk.CTk):
     def _on_tab_change(self):
         if self.tabview.get() == "Görevler":
             self._refresh_tasks()
+        elif self.tabview.get() == "Çalışma Odası":
+            if hasattr(self, "study_room_frame"):
+                self.study_room_frame._refresh_users_manual()
 
     def _refresh_tasks(self):
         try:
@@ -209,6 +231,34 @@ class App(ctk.CTk):
             self.list_frame.populate(tasks)
         except Exception as e:
             print(f"Görevler yüklenirken hata: {e}")
+
+    # ══════════════════════════ AYARLAR VE KAPATMA ══════════════════════════
+    def _load_settings(self):
+        if os.path.exists(self.settings_path):
+            try:
+                with open(self.settings_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {"username": ""}
+
+    def save_username(self, username):
+        self.settings["username"] = username
+        try:
+            with open(self.settings_path, "w", encoding="utf-8") as f:
+                json.dump(self.settings, f, ensure_ascii=False, indent=4)
+        except Exception as e:
+            print(f"Settings save error: {e}")
+            
+        if hasattr(self, "upload_frame"):
+            self.upload_frame.name_entry.delete(0, "end")
+            self.upload_frame.name_entry.insert(0, username)
+
+    def _on_closing(self):
+        # Kapatılırken çalışan süreyi kaydet
+        if hasattr(self, "study_room_frame"):
+            self.study_room_frame.save_and_stop_study_sync()
+        self.destroy()
 
     # ══════════════════════════════════════════════════════════════════
 
